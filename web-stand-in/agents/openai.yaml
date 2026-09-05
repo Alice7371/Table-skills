@@ -1,0 +1,6 @@
+interface:
+  display_name: "网页替身 · Web Stand-in"
+  short_description: "把可独立完成的复杂分析交给普通 ChatGPT，减少 Codex 重复工作"
+  default_prompt: "使用 $web-stand-in 将值得委派的独立重任务发到普通 ChatGPT；取回时直接保存并交付原文。"
+policy:
+  allow_implicit_invocation: true

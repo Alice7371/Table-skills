@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "additionalContextLimit": 1000,
+            "command": "\"<PYTHON_EXE>\" -X utf8 \"<SKILL_DIRECTORY>/scripts/compaction_reminder.py\" --state-dir \"<CODEX_HOME>/state/project-handoff\"",
+            "timeout": 5
+          }
+        ],
+        "matcher": "^(startup|resume|clear|compact)$"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "additionalContextLimit": 1000,
+            "command": "\"<PYTHON_EXE>\" -X utf8 \"<SKILL_DIRECTORY>/scripts/compaction_reminder.py\" --state-dir \"<CODEX_HOME>/state/project-handoff\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<PYTHON_EXE>\" -X utf8 \"<SKILL_DIRECTORY>/scripts/compaction_reminder.py\" --state-dir \"<CODEX_HOME>/state/project-handoff\"",
+            "timeout": 5
+          }
+        ],
+        "matcher": "^auto$"
+      }
+    ]
+  },
+  "description": "project-handoff: 第三次自动压缩后提醒，新增三次后解除冷却"
+}
