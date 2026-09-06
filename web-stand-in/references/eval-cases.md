@@ -7,16 +7,21 @@ ledgers, author benchmark reports, create synthetic jobs or start evaluation age
 
 - A public independent research question produces one standalone prompt, with
   preserved user requirements and no preliminary local research.
-- A new v2 job has task/prompt snapshots and one manifest; no worker or coordinator.
+- A new v3 job has task/prompt snapshots and one manifest; no worker or coordinator.
 - Loading for send validates its original send window and exact task identity.
 - Binding accepts a verified late send, is idempotent, and rejects a different Chat.
 - A sent job cannot become a new send through the loader.
 - Receiving hours after the send window uses a fresh read budget and the same Chat.
 - One-shot collection of an unfinished reply performs one read, no sleep and no save.
 - A later collection can obtain the result, without resending or parallel waiting.
-- A real file save preserves raw text and the complete deliverable.
-- Missing/malformed/oversized briefs and unmarked complete answers stay compact in
-  artifact mode; decision/full deliberately retain full output.
+- A file save preserves exact raw text as one answer.md and a small receipt.
+- Normal CommonJS imports and the documented concatenated runtime both load.
+- Legacy sources/mode options do not change task instructions or add a brief.
+- New/old pending jobs and old three-file saves resume without re-sending.
+- A Unicode/escaped packet exceeds the old command limit while the new command
+  stays short; saved UTF-8 bytes must exactly match the retrieved original.
+- Missing/malformed briefs, citation codes and unmarked completed answers stay
+  unchanged; no answer content or review flags are emitted automatically.
 - A matching already-saved receipt reuses local files after a program reset.
 - Identity changes, partial saves and failed saves cannot silently overwrite files.
 - A capped answer permits one capacity expansion, then refuses incomplete delivery.

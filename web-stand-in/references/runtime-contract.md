@@ -1,18 +1,20 @@
 # Runtime contract
 
-Version 1 uses one send, deferred collection and one read per collection request.
+The raw-file flow uses one send, deferred collection and one read per collection request.
 Validated environment: Codex desktop on Windows, a supported Chrome browser
 control session, and the official Chat reader. The skill does not provide a
 browser extension, login session, Chat API, or automatic completion notification.
-If either required tool is absent, report that prerequisite; do not improvise
+It also requires tools.apply_patch for programmatic packet writing and local
+PowerShell 7 / Node.js. If any required tool is absent, report it; do not improvise
 private endpoints, install a browser driver or scan application state.
 
 ## Prepare and send
 
 Use scripts/prepare-job.cjs with --task, --project-root, --output-dir and --skill-dir
-(all absolute paths). Use --sources false for ordinary transfer-only jobs; keep the
-user's evidence requirements in the task itself. --mode defaults to artifact;
-decision/full are available when the complete prose is needed in local context.
+(all absolute paths). Research and source requirements come from the task itself.
+No sources/mode option is needed: all results are saved verbatim with paths only
+returned. Legacy --sources true/false and --mode artifact/decision/full are
+accepted as deprecated no-ops; neither changes the prompt or return format.
 --minutes (default 25) limits sending, not later collection. The new output
 directory contains task.md, prompt.md and job.json, with no worker or ledger.
 
@@ -78,6 +80,13 @@ specific blocker to the user. Do not create more Chats or start a browser repair
 project during ordinary use. In-app browser use is an explicit alternative when
 requested and supported, not an automatic retry after an uncertain Chrome send.
 
+In the 2026-09-06 paired text sample, both Chrome and the in-app browser sent once
+and the official reader saved identical answers in one read each. The in-app
+combined create/open/AX call timed out; getting the already-created tab and using
+separate DOM/fill/click calls then worked. Prefer bounded documented calls and
+reuse an observed tab after a timeout rather than opening another one. This one
+pair does not establish an efficiency winner or explain the internal timeout.
+
 ## Deferred collection
 
 After binding, return the Chat link and pending state; end local waiting and leave
@@ -86,12 +95,16 @@ needed. User completion/collection input starts a new receive operation.
 
 The receiver loads the same job from disk. Its fresh read deadline is independent
 of sendDeadlineMs. Never modify a send deadline to make a receive pass. This flow
-supports new v2 jobs only; historical trial jobs are not silently migrated.
+creates v3 jobs and accepts published v2 jobs without changing their saved prompt,
+task hash, Chat identity or send window. Earlier trial schemas are not migrated.
 
 Run --receive-job <job.json> [readMs] to validate identity and get a request; the
 default read budget is 60000 ms and the permitted range is 1000–180000 ms.
-It returns already_saved if the three matching output files exist, with no Chat
-read. Partial or mismatched saves stop for inspection and are never overwritten.
+It returns already_saved for a matching answer.md + receipt, or an existing v2
+three-file save, without reading Chat. Legacy saves return their raw original.
+For an unsaved job it reserves answer.packet.json with a request-specific seed.
+The file-writing tool replaces that exact seed once. Partial/mismatched saves,
+including a filled packet from an interrupted transfer, are not overwritten.
 A missing Chat binding must be repaired from observed evidence, not guessed.
 
 Use the following program in functions, supplying the actual skill directory and
@@ -100,12 +113,12 @@ or separately read Chat. The source bundle stays inside the program.
 
 <!-- receive-example -->
 ```javascript
-// @exec: {"yield_time_ms": 55000, "max_output_tokens": 4000}
+// @exec: {"yield_time_ms": 55000, "max_output_tokens": 1200}
 const base = "RESOLVED_SKILL_DIRECTORY";
 const jobPath = "ACTUAL_PROJECT_JOB_JSON";
 const quote = value => "'" + value.replace(/'/g, "''") + "'";
 const prepared = await tools.exec_command({
-  cmd: "& 'C:\\Program Files\\nodejs\\node.exe' " +
+  cmd: "& node " +
     quote(base + "/scripts/prepare-job.cjs") + " --receive-job " + quote(jobPath),
   shell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", login: false,
   max_output_tokens: 2000
@@ -116,7 +129,7 @@ if (received.status === "already_saved") {
   text(received);
 } else {
   if (received.status !== "ready_to_receive") throw new Error("Receive is not ready.");
-  let bundle = load("webOffloadBundleV4:" + base);
+  let bundle = load("webStandInBundleV5:" + base);
   if (!bundle) {
     const file = await tools.exec_command({
       cmd: "& " + quote(base + "/scripts/chat-files.ps1") + " -Load",
@@ -127,17 +140,17 @@ if (received.status === "already_saved") {
     bundle = JSON.parse(file.output);
     if (bundle.waiter?.length !== bundle.waiterChars ||
         bundle.receiver?.length !== bundle.receiverChars ||
-        !bundle.waiter?.startsWith("// web-offload-waiter-v4") ||
-        !bundle.receiver?.startsWith("// web-offload-receiver-v4"))
+        !bundle.waiter?.startsWith("// web-stand-in-waiter-v5") ||
+        !bundle.receiver?.startsWith("// web-stand-in-receiver-v5"))
       throw new Error("Incomplete trusted runtime.");
-    store("webOffloadBundleV4:" + base, bundle);
+    store("webStandInBundleV5:" + base, bundle);
   }
   const run = new Function(bundle.waiter + "\n" + bundle.receiver + "\nreturn receiveChat;")();
   await run(received.request, {tools, store, load, text, setTimeout, clearTimeout, skillDirectory:base});
 }
 ```
 
-Use a larger outer output budget (for example 12000) when requesting decision/full.
+Node must be available on PATH; do not assume the user's install directory.
 If the host yields during one read, resume the same cell; never launch another
 receiver. A read can outlast its requested deadline because the current reader
 has no assumed abort API. Do not promise an exact timeout or zero model re-entry.
@@ -149,21 +162,22 @@ another generation. Explicit cancellation prevents automatic recovery.
 
 ## Save and deliver
 
-The program creates .raw.md, .md and .receipt.json without overwriting. Artifact
-mode preserves the complete deliverable and returns the existing brief, normally
-at most 2000 characters. Missing, ambiguous, empty or longer briefs return a small
-review notice plus paths, never a default full-text fallback. needs_review also
-stays compact in artifact mode. decision/full intentionally return complete prose.
+The program updates the reserved packet using tools.apply_patch inside functions,
+then calls chat-files.ps1 -PacketPath <path>. The answer is a JSON value, never
+shell code or part of command arguments. The script creates .md and .receipt.json
+without overwriting, then removes only its validated temporary packet on success.
+Whitespace, markers, brief (if any) and citation codes remain exact. Only status
+and paths are emitted: no extraction, URL checks, review flags or automatic
+full-text return. On failure, partial files and the packet remain available.
 
 A 10,000-character request budget fits below previously observed 12,000/20,000
 reader capacities; these are local observations, not a product guarantee. A saved
-oversized answer remains complete and is delivered with its size notice. A capacity-cut answer is
+oversized answer remains complete; it does not trigger a quality review. A capacity-cut answer is
 never accepted as complete. Do not shorten needed substance to force it through.
 
-Return the saved result/path and existing brief; do not open the report, check
-sources, grade content or write an acceptance note during normal delivery. Reader
-fields such as reviewRequired/needs_review do not authorize a source or content
-audit. Missing citations do not block delivery. User-requested quality testing is
+Return the saved original's path and completion status; do not open the report,
+check sources, grade content or write an acceptance note during normal delivery.
+No brief or citation metadata is produced. User-requested quality testing is
 a separate activity. Follow only the needed recovery section for actual identity,
 completion, truncation or saving problems.
 

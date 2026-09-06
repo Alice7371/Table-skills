@@ -21,11 +21,9 @@ gaps. Do not research the answer merely to prepare its prompt or reconstruct
 unrelated conversation/project history. No local data bridge is needed for public
 research. Small authorized excerpts may accompany a self-contained task.
 
-Select decision (complete concise answer), artifact (full saved report plus brief
-handoff), or full (all prose needed in local context). Ask for the usable output in
-one generation. For research distinguish official claims, community tests and
-inferences; retain relevant versions, dates and test conditions, ordinary source
-URLs beside key facts, and explicit evidence gaps.
+Ask for usable output in one generation, without a separate handoff summary.
+Whether to research externally, use supplied materials or include sources comes
+from the user's task, never from a receipt-checking preference.
 
 Normal use needs no benchmark, budget ledger, worker report or extra coordinator.
 Do not automatically spawn agents. Only for explicitly authorized delegation read
@@ -64,14 +62,19 @@ fixed receiver only when requested; count any host-required model resumptions.
 ## Retrieve
 
 Use the fixed program to bind the right request, retrieve, detect obvious cuts,
-and save exact raw text, the deliverable and a small receipt. Reuse a saved result
+and save exact raw text as answer.md with a small receipt. Reuse a saved result
 instead of rereading Chat. Scripts and intermediate tool data stay inside functions.
 
-Artifact mode returns the existing brief. If the brief is missing or malformed,
-save the full result and return only a compact status notice and paths. Do not
-open the full report merely to review it. Do not send another generation or dump the whole report
-into model context merely to repair a handoff format. Full mode remains available
-when the actual task requires it.
+Return only the saved path and completion status. Do not extract a brief, strip
+markers, create a second body, rewrite or automatically open the answer. Read the
+saved original only when the user's subsequent work actually needs its content.
+The receiver uses the file-writing tool for a temporary packet; the save command
+contains only its path, never the answer. Require the supported file-writing tool.
+
+For explicitly requested web images or complete downloadable files, use
+[file-return.md](references/file-return.md) instead of the text-only receiver.
+Keep the original file bytes and return the project path. Do not automatically
+expand research routing to every image request based on one successful test.
 
 The default total answer budget is 10,000 characters, based on the tested text
 reader path, not a model limit. Never silently clip an answer. If the requested
@@ -87,12 +90,12 @@ for correctness, grade quality, rewrite the answer or create an acceptance repor
 by default. Missing source URLs or unresolved citation codes do not block delivery
 and must not start another research pass or a browser citation-recovery loop.
 
-Deliver the original result or its saved path and existing brief. Say it was
+Deliver the saved original's path. Say it was
 retrieved, not independently fact-checked. Content/source review is opt-in: perform
 it only when the user explicitly requests review or a quality test, and count that
-extra work separately. Retrieval metadata such as reviewRequired is advisory and
-does not authorize semantic review. Use --sources false for ordinary transfer-only
-jobs; preserve any source requirements the user gives to the web task itself.
+extra work separately. Ordinary reception performs no URL/citation inspection
+and emits no content-review flags. Legacy --sources and --mode options are
+accepted but do not alter the task or raw-file delivery.
 
 For actual identity, completion or saving failures, read only the needed part of
 [recovery-contract.md](references/recovery-contract.md). A pending deferred result

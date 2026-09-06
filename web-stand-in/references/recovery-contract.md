@@ -5,12 +5,11 @@ Pending is not a failure: end local collection and leave the web task running.
 A later user collection request creates a new local read budget, while preserving
 the original Chat and request identity. Do not revive an expired send window.
 
-## Missing or malformed brief
+## Original answer delivery
 
-A complete artifact is saved even if its brief cannot be extracted. Return paths
-and a compact status notice. Do not open the report for content review, reread
-Chat, automatically output all prose, or ask for a new summary. Reading sections
-for quality assessment requires an explicit user request for review/testing.
+A completed answer is saved verbatim, including any brief, markers and citation
+codes. Return paths and status only. Do not extract a summary, open the report for
+content review, reread Chat, output all prose or ask for a new summary.
 
 ## Reader failure or capacity cut
 
@@ -33,7 +32,7 @@ display from a genuinely incomplete retrieved body.
 ## Save failure
 
 The receiver retains its answer in program state and reports the failed save.
-Any partial files remain evidence. Do not overwrite them, reread the source or
+Any partial files and the temporary packet remain evidence. Do not overwrite them, reread the source or
 retry a save automatically; identify the filesystem error and recover the held
 body into an authorized new output location when appropriate. A matching saved
 receipt and files are reused rather than fetched again.

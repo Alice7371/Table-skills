@@ -8,22 +8,34 @@ const fixture=fs.mkdtempSync(path.join(root,'fixtures-'));
 const task=path.join(fixture,'input.md');
 const source='中文独立调研任务\r\n保留  空格、引号\'与 $(literal)。\r\n';
 fs.writeFileSync(task,source,'utf8');
-const runtime=fs.readFileSync(path.join(skill,'references/runtime-contract.md'),'utf8');
+const runtime=fs.readFileSync(path.join(skill,'references/runtime-contract.md'),'utf8').replace(/\r\n/g,'\n');
 const code=fs.readFileSync(path.join(skill,'scripts/wait-for-chat.js'),'utf8')+'\n'+fs.readFileSync(path.join(skill,'scripts/receive-chat.js'),'utf8');
-const {receiveChat,waitForChat,selectChatView}=new Function(code+'\nreturn {receiveChat,waitForChat,selectChatView};')();
+const {receiveChat,waitForChat}=new Function(code+'\nreturn {receiveChat,waitForChat};')();
 const chatId='11111111-2222-3333-4444-555555555555';
 const results=[];
 async function test(name,fn) { await fn(); results.push({name,passed:true}); }
-function prepare(name) { return helpers.prepareJob({task,projectRoot:root,outputDir:path.join(fixture,name),skillDir:skill}); }
+function prepare(name,extra={}) { return helpers.prepareJob({task,projectRoot:root,outputDir:path.join(fixture,name),skillDir:skill,...extra}); }
 function packet(request,answer,status='completed') { return {thread:{id:chatId,kind:'chatgpt'},page:{order:'newest_first'},turns:[{id:'turn-1',status,items:[{type:'userMessage',content:request.requestTag},{type:'agentMessage',id:'answer-1',text:answer}]}]}; }
-function complete(request) { return '[WO_BRIEF_BEGIN:'+request.briefId+']\n结论待核实。\n[WO_BRIEF_END:'+request.briefId+']\nREPORT_BODY 中文  原文\' $(literal)。\nhttps://example.com/source\n[WEB_OFFLOAD_DONE]\n'; }
-function shell(args) { const r=spawnSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-Command',args.cmd],{encoding:'utf8',timeout:30000}); return {exit_code:r.status,output:r.stdout.trim(),error:r.stderr.trim()}; }
+function complete(request) { return "REPORT_BODY 中文  原文' $(literal)。\r\nhttps://example.com/source\r\n[WEB_OFFLOAD_DONE]\r\n"; }
+function shell(args) { const r=spawnSync(process.env.WEB_STAND_IN_PWSH || 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',['-NoProfile','-Command',args.cmd],{encoding:'utf8',timeout:30000}); return {exit_code:r.status,output:r.stdout.trim(),error:r.stderr.trim()}; }
 function hostFor(request,replies,failSave=false) {
-  const state=new Map(), output=[], calls={read:0,save:0,exec:0,timer:0};
+  const state=new Map(), output=[], calls={read:0,save:0,exec:0,timer:0,patch:0};
   const host={skillDirectory:skill,store:(k,v)=>state.set(k,v),load:k=>state.get(k),text:v=>output.push(v),
     setTimeout:(fn,ms)=>{calls.timer++;return setTimeout(fn,ms);},clearTimeout,
-    tools:{mcp__codex_app__read_thread:async()=>{const i=calls.read++;return packet(request,replies[Math.min(i,replies.length-1)].answer,replies[Math.min(i,replies.length-1)].status);},
-      exec_command:async args=>{calls.exec++;if(args.cmd.includes(' -PacketJson ')){calls.save++;if(failSave)return {exit_code:1,output:'save failure fixture'};}return shell(args);}}};
+    tools:{apply_patch:async patch=>{
+        calls.patch++;
+        const lines=patch.split('\n');
+        assert.equal(lines[0],'*** Begin Patch');
+        assert.equal(lines[1],'*** Update File: '+request.packetPath.replace(/\\/g,'/'));
+        assert.equal(lines[2],'@@');assert.equal(lines[3],'-'+request.packetSeed);
+        assert.equal(lines[5],'*** End Patch');
+        assert.equal(fs.readFileSync(request.packetPath,'utf8'),request.packetSeed+'\n');
+        assert.ok(lines[4].startsWith('+'));
+        JSON.parse(lines[4].slice(1));
+        fs.writeFileSync(request.packetPath,lines[4].slice(1)+'\n','utf8');
+        return {status:'written'};
+      },mcp__codex_app__read_thread:async()=>{const i=calls.read++;return packet(request,replies[Math.min(i,replies.length-1)].answer,replies[Math.min(i,replies.length-1)].status);},
+      exec_command:async args=>{calls.exec++;if(args.cmd.includes(' -PacketPath ')){calls.save++;if(failSave)return {exit_code:1,output:'save failure fixture'};}return shell(args);}}};
   return {host,calls,output};
 }
 function bound(name) { const p=prepare(name);helpers.bindChat(p.jobPath,chatId);return {jobPath:p.jobPath,request:helpers.receiveJob(p.jobPath).request}; }
@@ -50,11 +62,11 @@ function bound(name) { const p=prepare(name);helpers.bindChat(p.jobPath,chatId);
   });
   const resumed=bound('resume'), answer=complete(resumed.request), flow=hostFor(resumed.request,[{answer:'',status:'in_progress'},{answer,status:'completed'}]);
   await test('Unfinished collection performs one read and no sleep or save',async()=>{
-    const result=await receiveChat(resumed.request,flow.host);assert.equal(result.status,'pending');assert.deepEqual(flow.calls,{read:1,save:0,exec:0,timer:0});
+    const result=await receiveChat(resumed.request,flow.host);assert.equal(result.status,'pending');assert.deepEqual(flow.calls,{read:1,save:0,exec:0,timer:0,patch:0});
   });
   await test('Explicit later collection resumes after a new read budget and saves exact UTF-8',async()=>{
     const result=await receiveChat({...resumed.request,deadlineMs:Date.now()+90000},flow.host);assert.equal(result.status,'ready');assert.equal(flow.calls.read,2);assert.equal(flow.calls.save,1);assert.equal(flow.calls.timer,0);
-    assert.equal(fs.readFileSync(result.rawPath,'utf8'),answer);assert.ok(fs.readFileSync(result.bodyPath,'utf8').includes("REPORT_BODY 中文  原文' $(literal)。"));assert.equal(result.viewMode,'brief');
+    assert.equal(fs.readFileSync(result.answerPath,'utf8'),answer);assert.ok(!fs.existsSync(resumed.request.outputBase+'.raw.md'));assert.ok(!fs.existsSync(resumed.request.packetPath));assert.ok(!JSON.stringify(flow.output).includes('REPORT_BODY'));
   });
   await test('Saved receipt survives a program reset and avoids another Chat read',()=>{
     const result=helpers.receiveJob(resumed.jobPath);assert.equal(result.status,'already_saved');assert.equal(result.quality,'unreviewed');
@@ -67,10 +79,18 @@ function bound(name) { const p=prepare(name);helpers.bindChat(p.jobPath,chatId);
     if(variant==='too-long')text='[WO_BRIEF_BEGIN:'+item.request.briefId+']\n'+'概'.repeat(2001)+'\n[WO_BRIEF_END:'+item.request.briefId+']\n'+text;
     if(variant==='unmarked')text='REPORT_BODY_unmarked 中文报告';
     const ctx=hostFor(item.request,[{answer:text,status:'completed'}]), result=await receiveChat(item.request,ctx.host);
-    assert.equal(result.viewMode,'receipt');assert.equal(fs.readFileSync(result.rawPath,'utf8'),text);assert.ok(fs.readFileSync(result.bodyPath,'utf8').includes('REPORT_BODY_'+variant));assert.ok(!JSON.stringify(ctx.output).includes('REPORT_BODY_'));assert.equal(ctx.calls.read,1);
+    assert.equal(result.status,'ready');assert.equal(fs.readFileSync(result.answerPath,'utf8'),text);assert.ok(!JSON.stringify(ctx.output).includes('REPORT_BODY_'));assert.equal(ctx.calls.read,1);
   });
-  await test('Explicit full mode still returns complete prose',()=>{
-    const body='全文中文\n[WEB_OFFLOAD_DONE]\n';const view=selectChatView(body,{returnMode:'full'},'ready');assert.equal(view.viewMode,'full');assert.ok(view.view.includes('全文中文'));
+  await test('Deprecated sources and modes never change task instructions or require a brief',()=>{
+    const prompts=[];
+    for (const [i,opts] of [{},{requireSourceLinks:false},{requireSourceLinks:true},{returnMode:'full'},{returnMode:'decision'}].entries()) {
+      const p=prepare('options-'+i,opts), loaded=helpers.loadJob(p.jobPath);
+      prompts.push(loaded.prompt.replace(loaded.job.requestTag,'[REQUEST]'));
+      assert.ok(!loaded.prompt.includes('依据所给材料回答'));
+      assert.ok(!loaded.prompt.includes('[WO_BRIEF_BEGIN:'));
+      assert.equal(loaded.job.schema,'web-offload-job-v3');
+    }
+    for(const prompt of prompts) assert.equal(prompt,prompts[0]);
   });
   await test('Wrong latest request is rejected before saving',async()=>{
     const item=bound('wrong'),ctx=hostFor(item.request,[{answer:complete(item.request),status:'completed'}]);
@@ -129,11 +149,112 @@ function bound(name) { const p=prepare(name);helpers.bindChat(p.jobPath,chatId);
     await run(ctx.host.tools,ctx.host.load,ctx.host.store,ctx.host.text,setTimeout,clearTimeout);assert.equal(ctx.calls.read,1);assert.equal(ctx.output.at(-1).status,'already_saved');
   });
   await test('Entrypoint metadata and all relative Markdown references are valid',()=>{
-    const md=fs.readFileSync(path.join(skill,'SKILL.md'),'utf8');assert.ok(md.startsWith('---\nname: web-stand-in\n'));assert.ok(md.includes('description: >-'));
+    const md=fs.readFileSync(path.join(skill,'SKILL.md'),'utf8');assert.ok(md.replace(/\r\n/g,'\n').startsWith('---\nname: web-stand-in\n'));assert.ok(md.includes('description: >-'));
     for(const file of ['SKILL.md',...fs.readdirSync(path.join(skill,'references')).filter(x=>x.endsWith('.md')).map(x=>'references/'+x)]) {
       const text=fs.readFileSync(path.join(skill,file),'utf8');for(const m of text.matchAll(/\]\(([^)]+\.md)(?:#[^)]*)?\)/g))if(!/^https?:/.test(m[1]))assert.ok(fs.existsSync(path.resolve(skill,path.dirname(file),m[1])),file+': '+m[1]);
     }
   });
+
+  await test('CommonJS entrypoints load and receiver works outside concatenated execution',async()=>{
+    const waiter=require('../web-stand-in/scripts/wait-for-chat.js');
+    const receiver=require('../web-stand-in/scripts/receive-chat.js');
+    assert.equal(typeof waiter.waitForChat,'function');
+    assert.equal(typeof waiter.inspectAnswerEnd,'function');
+    assert.equal(typeof receiver.receiveChat,'function');
+    assert.ok(!('waitForRecoveryTime' in waiter));
+    const item=bound('commonjs'),ctx=hostFor(item.request,[{answer:complete(item.request),status:'completed'}]);
+    assert.equal((await receiver.receiveChat(item.request,ctx.host)).status,'ready');
+  });
+  await test('Long packet uses the file tool; no answer or long payload enters process arguments',async()=>{
+    const item=bound('long-packet');
+    const text='\0'.repeat(6000)+'中文😀\'"\\\t\r\n'.repeat(700)+'\r\n[WEB_OFFLOAD_DONE]\r\n';
+    assert.ok(text.length<20000);assert.ok(JSON.stringify({raw:text}).length>32767);
+    const request={...item.request,initialCap:20000},ctx=hostFor(request,[{answer:text,status:'completed'}]);
+    const exec=ctx.host.tools.exec_command;let commandLength=0;
+    ctx.host.tools.exec_command=async args=>{
+      commandLength=args.cmd.length;
+      assert.ok(commandLength<1000);assert.ok(!args.cmd.includes(' -PacketJson '));
+      assert.ok(!args.cmd.includes('中文'));assert.ok(!args.cmd.includes('raw'));
+      return exec(args);
+    };
+    const result=await receiveChat(request,ctx.host);
+    assert.deepEqual(fs.readFileSync(result.answerPath),Buffer.from(text,'utf8'));
+    assert.equal(ctx.calls.patch,1);assert.equal(ctx.calls.save,1);assert.equal(ctx.calls.read,1);
+    assert.ok(!fs.existsSync(item.request.packetPath));
+    assert.ok(JSON.stringify(ctx.output).length<1500);
+  });
+  await test('Malformed citation codes and links remain exact and never create review flags',async()=>{
+    const item=bound('citations'),text='原文 \uE200cite\uE202missing\uE201 https://invalid.example/ 引用残缺\uE200\n';
+    const ctx=hostFor(item.request,[{answer:text,status:'completed'}]), result=await receiveChat(item.request,ctx.host);
+    assert.equal(result.status,'ready');assert.equal(fs.readFileSync(result.answerPath,'utf8'),text);
+    assert.ok(!JSON.stringify(ctx.output).includes('reviewRequired'));
+    assert.ok(!JSON.stringify(ctx.output).includes('deliveryChecks'));
+    assert.ok(!JSON.stringify(ctx.output).includes('missing'));
+    assert.equal(ctx.calls.read,1);
+  });
+  await test('Missing file-writing capability fails before reading Chat',async()=>{
+    const item=bound('no-writer'),ctx=hostFor(item.request,[{answer:'x',status:'completed'}]);
+    delete ctx.host.tools.apply_patch;
+    await assert.rejects(receiveChat(item.request,ctx.host),/file-writing tool/);
+    assert.equal(ctx.calls.read,0);
+  });
+  await test('A failed packet save is preserved and blocks collection after process reset',async()=>{
+    const item=bound('failed-reset'),ctx=hostFor(item.request,[{answer:complete(item.request),status:'completed'}],true);
+    await assert.rejects(receiveChat(item.request,ctx.host),/Save failed/);
+    assert.equal(JSON.parse(fs.readFileSync(item.request.packetPath,'utf8')).raw,complete(item.request));
+    assert.throws(()=>helpers.receiveJob(item.jobPath),/Partial existing save packet/);
+  });
+  await test('Pending v2 job keeps original prompt and Chat but saves raw using the new format',async()=>{
+    const p=prepare('legacy-pending'), job=JSON.parse(fs.readFileSync(p.jobPath,'utf8'));
+    job.schema='web-offload-job-v2';job.requireSourceLinks=true;job.returnMode='artifact';job.briefId=job.jobId;
+    fs.writeFileSync(p.jobPath,JSON.stringify(job),'utf8');
+    const prompt=fs.readFileSync(job.promptPath,'utf8');
+    helpers.bindChat(p.jobPath,chatId);
+    const request=helpers.receiveJob(p.jobPath).request, text='[WO_BRIEF_BEGIN:old]\n旧版交接\n[WO_BRIEF_END:old]\n正文\n[WEB_OFFLOAD_DONE]\n';
+    const ctx=hostFor(request,[{answer:text,status:'completed'}]),result=await receiveChat(request,ctx.host);
+    assert.equal(fs.readFileSync(result.answerPath,'utf8'),text);
+    assert.equal(fs.readFileSync(job.promptPath,'utf8'),prompt);
+    assert.equal(helpers.receiveJob(p.jobPath).status,'already_saved');
+  });
+  await test('Completed v2 three-file save returns its original raw file without changes',()=>{
+    const p=prepare('legacy-saved'), job=JSON.parse(fs.readFileSync(p.jobPath,'utf8'));
+    job.schema='web-offload-job-v2';fs.writeFileSync(p.jobPath,JSON.stringify(job),'utf8');helpers.bindChat(p.jobPath,chatId);
+    const rawPath=job.outputBase+'.raw.md',bodyPath=job.outputBase+'.md';
+    fs.writeFileSync(rawPath,'原始稿\n','utf8');fs.writeFileSync(bodyPath,'旧版正文\n','utf8');
+    fs.writeFileSync(job.outputBase+'.receipt.json',JSON.stringify({schemaVersion:1,chatId,requestTag:job.requestTag,bodyStatus:'needs_review',rawPath,bodyPath}),'utf8');
+    const result=helpers.receiveJob(p.jobPath);
+    assert.equal(result.status,'already_saved');assert.equal(result.answerPath,rawPath);
+    assert.equal(fs.readFileSync(bodyPath,'utf8'),'旧版正文\n');
+  });
+  await test('Existing output is not overwritten and failed transfer keeps its packet',async()=>{
+    const item=bound('existing-answer'),ctx=hostFor(item.request,[{answer:complete(item.request),status:'completed'}]);
+    fs.writeFileSync(item.request.outputBase+'.md','用户原有内容','utf8');
+    await assert.rejects(receiveChat(item.request,ctx.host),/Save failed/);
+    assert.equal(fs.readFileSync(item.request.outputBase+'.md','utf8'),'用户原有内容');
+    assert.ok(fs.existsSync(item.request.packetPath));assert.equal(ctx.calls.read,1);
+  });
+  await test('Changed packet seed cannot be overwritten',async()=>{
+    const item=bound('changed-packet'),ctx=hostFor(item.request,[{answer:complete(item.request),status:'completed'}]);
+    fs.writeFileSync(item.request.packetPath,'changed packet\n','utf8');
+    await assert.rejects(receiveChat(item.request,ctx.host));
+    assert.equal(fs.readFileSync(item.request.packetPath,'utf8'),'changed packet\n');
+    assert.equal(ctx.calls.save,0);
+  });
+  await test('Unicode and quoted output paths preserve exact text',async()=>{
+    const item=bound("中文 目录's"),answer=complete(item.request),ctx=hostFor(item.request,[{answer,status:'completed'}]);
+    const result=await receiveChat(item.request,ctx.host);
+    assert.deepEqual(fs.readFileSync(result.answerPath),Buffer.from(answer,'utf8'));
+    assert.equal(helpers.receiveJob(item.jobPath).status,'already_saved');
+  });
+  await test('Opt-in progress still reports its log and stops after completion',async()=>{
+    const item=bound('progress'),request={...item.request,recordProgress:true};
+    const ctx=hostFor(request,[{answer:complete(request),status:'completed'}]);
+    const result=await receiveChat(request,ctx.host);
+    const events=fs.readFileSync(result.progress.path,'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.map(x=>x.status),['receiving','ready']);
+    assert.equal(result.progress.warning,null);assert.equal(ctx.calls.read,1);
+  });
+
   fs.writeFileSync(path.join(root,'validation.json'),JSON.stringify({at:new Date().toISOString(),status:'passed',checks:results,fixture,liveBrowserTest:false,usageSavingsMeasured:false},null,2)+'\n','utf8');
   console.log(JSON.stringify({status:'passed',checks:results.length,fixture,liveBrowserTest:false}));
 })().catch(error=>{fs.writeFileSync(path.join(root,'validation.json'),JSON.stringify({status:'failed',checks:results,error:error.stack,fixture},null,2),'utf8');console.error(error.stack);process.exitCode=1;});

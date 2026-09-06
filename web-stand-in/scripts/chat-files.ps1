@@ -1,7 +1,7 @@
 [CmdletBinding(DefaultParameterSetName = 'Load')]
 param(
     [Parameter(ParameterSetName = 'Load')][switch]$Load,
-    [Parameter(Mandatory, ParameterSetName = 'Save')][string]$PacketJson,
+    [Parameter(Mandatory, ParameterSetName = 'Save')][string]$PacketPath,
     [Parameter(Mandatory, ParameterSetName = 'Progress')][string]$ProgressJson
 )
 $ErrorActionPreference = 'Stop'
@@ -16,8 +16,14 @@ if ($PSCmdlet.ParameterSetName -eq 'Load') {
 $created = [System.Collections.Generic.List[string]]::new()
 try {
     $isProgress = $PSCmdlet.ParameterSetName -eq 'Progress'
-    $packet = ConvertFrom-Json -InputObject $(if ($isProgress) { $ProgressJson } else { $PacketJson }) -Depth 12
-    $required = if ($isProgress) { @('projectRoot', 'outputBase') } else { @('projectRoot', 'outputBase', 'raw', 'delivery') }
+    if ($isProgress) { $packet = ConvertFrom-Json -InputObject $ProgressJson -Depth 12 }
+    else {
+        if ($PacketPath -notmatch '^[A-Za-z]:[\\/]' -or $PacketPath -match '[\r\n]' -or $PacketPath.Substring(2).Contains(':')) { throw 'Absolute packet path required.' }
+        $packetFile = Get-Item -LiteralPath $PacketPath -Force
+        if ($packetFile.PSIsContainer -or ($packetFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Packet must be a regular file.' }
+        $packet = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($PacketPath, $utf8)) -Depth 12
+    }
+    $required = if ($isProgress) { @('projectRoot', 'outputBase') } else { @('projectRoot', 'outputBase', 'raw') }
     foreach ($name in $required) {
         if ($packet.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($packet.$name)) { throw "Missing text field: $name" }
     }
@@ -55,18 +61,19 @@ try {
         [pscustomobject]@{status='progress_saved'; path=$progressPath} | ConvertTo-Json -Compress
         exit 0
     }
-    $rawPath = $base + '.raw.md'
-    $bodyPath = $base + '.md'
+    if (-not ([System.IO.Path]::GetFullPath($PacketPath)).Equals($base + '.packet.json', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Packet path does not match the output.' }
+    $answerPath = $base + '.md'
     $receiptPath = $base + '.receipt.json'
-    foreach ($filePath in @($rawPath, $bodyPath, $receiptPath)) {
+    foreach ($filePath in @(($base + '.raw.md'), $answerPath, $receiptPath)) {
         if (Test-Path -LiteralPath $filePath) { throw "Existing file will not be overwritten: $filePath" }
     }
-    if (-not $packet.receipt) { throw 'Missing receipt.' }
-    $packet.receipt | Add-Member -NotePropertyName rawPath -NotePropertyValue $rawPath
-    $packet.receipt | Add-Member -NotePropertyName bodyPath -NotePropertyValue $bodyPath
+    if ($packet.receipt.schemaVersion -ne 2 -or $packet.receipt.bodyStatus -ne 'ready' -or
+        $packet.receipt.chatId -notmatch '^[0-9a-fA-F-]{36}$' -or
+        $packet.receipt.requestTag -notmatch '^\[WO_REQUEST:[A-Za-z0-9_-]{1,80}\]$' -or
+        $packet.receipt.answerChars -ne $packet.raw.Length) { throw 'Invalid save receipt.' }
+    $packet.receipt | Add-Member -NotePropertyName answerPath -NotePropertyValue $answerPath
     $files = @(
-        @{path=$rawPath; text=$packet.raw},
-        @{path=$bodyPath; text=$packet.delivery},
+        @{path=$answerPath; text=$packet.raw},
         @{path=$receiptPath; text=($packet.receipt | ConvertTo-Json -Depth 12 -Compress)}
     )
     foreach ($file in $files) {
@@ -74,7 +81,10 @@ try {
         $created.Add($file.path)
         try { $bytes = $utf8.GetBytes($file.text); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
     }
-    [pscustomobject]@{status='saved'; rawPath=$rawPath; bodyPath=$bodyPath; receiptPath=$receiptPath} | ConvertTo-Json -Compress
+    # The exact packet path and its project boundary were checked above. Remove
+    # only this transfer file after both outputs have been written successfully.
+    Remove-Item -LiteralPath $PacketPath -ErrorAction Stop
+    [pscustomobject]@{status='saved'; answerPath=$answerPath; receiptPath=$receiptPath} | ConvertTo-Json -Compress
 } catch {
     [pscustomobject]@{status='save_error'; created=@($created); error=$_.Exception.Message} | ConvertTo-Json -Compress
     exit 1

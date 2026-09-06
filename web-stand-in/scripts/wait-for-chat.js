@@ -1,4 +1,4 @@
-// web-offload-waiter-v4
+// web-stand-in-waiter-v5
 // Pure JavaScript: all external access is supplied through io.read.
 // Tool output is parsed as data, never executed.
 // Decode one Markdown escape layer only for protocol-label comparisons.
@@ -47,71 +47,6 @@ function inspectCompletion(text, marker = "[WEB_OFFLOAD_DONE]") {
 function inspectAnswerEnd(text, marker = "[WEB_OFFLOAD_DONE]") {
   return inspectCompletion(text, marker)?.evidence ?? null;
 }
-
-// Keep the original answer in the result. This delivery view removes only
-// validated transport fences and the final marker; it does not rewrite prose.
-function prepareChatDelivery(text, marker = "[WEB_OFFLOAD_DONE]") {
-  const ending = inspectCompletion(text, marker);
-  if (!ending) throw new Error("Review the answer ending before preparing delivery.");
-  const newline = text.includes("\r\n") ? "\r\n" : "\n";
-  return text.split(/\r?\n/)
-    .filter((_, i) => i !== ending.markerLine && !ending.wrappers.has(i))
-    .join(newline);
-}
-
-// Optional transport metadata, not a resolver or a body-completeness gate.
-// Keep occurrence offsets and raw groups without guessing URLs, changing the
-// official answer, or requesting more reads or messages for citations.
-function inspectCitationTransport(text) {
-  const codeRanges = [];
-  let fence = null;
-  for (const lineMatch of text.matchAll(/[^\n]*(?:\n|$)/g)) {
-    if (!lineMatch[0]) continue;
-    const start = lineMatch.index;
-    const line = lineMatch[0].replace(/\r?\n$/, "");
-    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (fence || match || /^(?: {4}|\t)/.test(line)) {
-      codeRanges.push([start, start + line.length]);
-      if (match) {
-        if (!fence) fence = match[1];
-        else if (match[1][0] === fence[0] && match[1].length >= fence.length &&
-                 !match[2].trim()) fence = null;
-      }
-      continue;
-    }
-    const ticks = [...line.matchAll(/`+/g)];
-    for (let i = 0; i < ticks.length; i++) {
-      const closing = ticks.findIndex((tick, j) => j > i && tick[0] === ticks[i][0]);
-      if (closing < 0) continue;
-      codeRanges.push([start + ticks[i].index,
-        start + ticks[closing].index + ticks[closing][0].length]);
-      i = closing;
-    }
-  }
-  const groups = [], malformed = [];
-  let codeLiteralCount = 0;
-  // Record orphan delimiters and incomplete/unknown internal markup, including
-  // tokens with a missing closing delimiter or partial "cite" word. Plain words
-  // such as turn123view0 are unaffected.
-  const tokens = /\uE200[^\uE200\uE201\r\n]*(?:\uE201|(?=\uE200|[\r\n]|$))|[\uE201\uE202]/g;
-  for (const match of text.matchAll(tokens)) {
-    const occurrence = {start: match.index, end: match.index + match[0].length,
-      raw: match[0]};
-    if (codeRanges.some(([start, end]) => occurrence.start >= start && occurrence.end <= end)) {
-      codeLiteralCount++;
-      continue;
-    }
-    const group = match[0].match(/^\uE200cite((?:\uE202[^\s\uE200\uE201\uE202]+)+)\uE201$/);
-    if (group) groups.push({...occurrence, sourceIds: group[1].slice(1).split("\uE202")});
-    else malformed.push(occurrence);
-  }
-  const plainUrlCount = [...text.matchAll(/https?:\/\/[^\s<>\[\]"`]+/g)]
-    .filter(match => !codeRanges.some(([start, end]) => match.index >= start && match.index < end)).length;
-  return {state: groups.length || malformed.length ? "unresolved" :
-    codeLiteralCount ? "code_literal" : "clear", groups, malformed, codeLiteralCount, plainUrlCount};
-}
-
-// Used only after an early recovery check sees this reply still generating.
 
 async function waitForChat(options, io) {
   const now = io.now || Date.now;
@@ -251,19 +186,13 @@ async function waitForChat(options, io) {
       }
       return recover("truncated", answerResult);
     }
-    const citationTransport = inspectCitationTransport(answer);
     const endEvidence = inspectAnswerEnd(answer, marker);
-    const completedAnswer = {...answerResult, citationTransport, endEvidence,
+    const completedAnswer = {...answerResult, endEvidence,
       remoteState: "completed"};
-    // Citation transport is independent of body recovery. Keep unresolved or
-    // literal tokens verbatim; source work depends on a separate user need.
-    if (endEvidence)
-      return result("ready", completedAnswer);
-    // A short unmarked answer can be valid. Return it for semantic review;
-    // never spend another Chat message just to fix the marker.
-    return result("needs_review", completedAnswer);
+    // The reader reports completion; missing markers do not request a review.
+    // The exact answer (including any markers or citation codes) is preserved.
+    return result("ready", completedAnswer);
   }
 }
 if (typeof module !== "undefined" && module.exports)
-  module.exports = {waitForChat, inspectAnswerEnd, inspectCitationTransport,
-    waitForRecoveryTime, prepareChatDelivery};
+  module.exports = {waitForChat, inspectAnswerEnd};
