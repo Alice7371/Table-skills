@@ -82,7 +82,7 @@ def read_state(path, session):
                      tracked_reminder_count=0, stage_keys=[], confusion_keys=[],
                      proposal=None, defer_until=None, last_response_turn_id=None,
                      active_turn_id=None)
-    if (state.get("tracking_version") != 2 or
+    if (state.get("tracking_version") not in {2, 3} or
             type(state.get("tracked_reminder_count")) is not int or
             state["tracked_reminder_count"] < 0 or
             (state.get("reminder_count") is not None and
@@ -91,7 +91,60 @@ def read_state(path, session):
             not isinstance(state.get("confusion_keys"), list) or
             (state.get("proposal") is not None and not isinstance(state["proposal"], dict))):
         raise ValueError("invalid tracking fields; original file preserved")
+    if state["tracking_version"] == 2:
+        # Old counts included commentary. Preserve evidence; never infer old
+        # final delivery totals from a compaction index or a discarded proposal.
+        state["legacy_delivery_counts"] = {k: state.get(k) for k in
+            ("reminder_count", "tracked_reminder_count", "last_notified_at")}
+        proposal = state["proposal"]
+        total = state["reminder_count"]
+        known_single = total == 1 and proposal and proposal.get("counted")
+        if total == 0:
+            pass
+        elif known_single:
+            state["reminder_count"] = int(bool(proposal.get("final_delivered")))
+            if not proposal.get("final_delivered"):
+                proposal["counted"] = False
+                if not proposal.get("closed"):
+                    state["stage_keys"] = [k for k in state["stage_keys"] if k != proposal["stage_key"]]
+                state["last_notified_at"] = None
+                if state["response"] == "pending":
+                    state["next_reminder_at"] = INTERVAL
+        else:
+            state["reminder_count"] = None
+        state["tracked_reminder_count"] = 0
+        state.update(tracking_version=3, evaluation=None, stop_audit=None)
+    if (state.get("evaluation") is not None and not isinstance(state["evaluation"], dict)) or (
+            state.get("stop_audit") is not None and not isinstance(state["stop_audit"], dict)):
+        raise ValueError("invalid evaluation state")
     return state
+
+
+def evaluation_due(state, turn):
+    if state["muted"] or state["defer_until"] or state["auto_count"] < state["next_reminder_at"]:
+        return False
+    evaluation = state.get("evaluation")
+    if not evaluation or evaluation["auto_count"] < state["auto_count"]:
+        return True
+    return evaluation["next_check"] == "next_turn" and evaluation["turn_id"] != turn
+
+
+def evaluate(state, event, opts):
+    turn = key_arg(event.get("turn_id"), "turn_id")
+    if state.get("active_turn_id") and turn != state["active_turn_id"]:
+        raise ValueError("evaluation must use current host turn")
+    decision = opts.get("outcome")
+    next_check = opts.get("next_check")
+    note = key_arg(opts.get("note"), "evaluation note")
+    if decision not in {"defer", "skip"} or next_check not in {"next_turn", "next_compaction"}:
+        raise ValueError("choose defer/skip and next_turn/next_compaction")
+    state["evaluation"] = dict(turn_id=turn, auto_count=state["auto_count"],
+        decision=decision, note=note, next_check=next_check)
+    # A current negative decision withdraws an unfulfilled proposal, not a user response.
+    proposal = state["proposal"]
+    if proposal and not proposal["closed"] and not proposal["final_delivered"]:
+        proposal["closed"] = True
+    return {"evaluated": True, "evaluation": state["evaluation"]}
 
 
 def key_arg(value, label):
@@ -118,6 +171,7 @@ def prepare(state, event, reason, opts):
             old["stage_key"] == stage and old["reason"] == reason and
             old["cause_key"] == opts.get("cause_key")):
         old.update(turn_id=turn, notice=notice)
+        record_ready(state, turn)
         return {"prepared": True, "proposal": old}
     if state["defer_until"] and reason not in {"checkpoint", "confusion"}:
         return {"prepared": False, "why": "waiting_for_user_checkpoint"}
@@ -149,16 +203,23 @@ def prepare(state, event, reason, opts):
                 "commentary_delivered": False, "final_delivered": False,
                 "retry_used": False, "final_missed": False, "closed": False}
     state.update(proposal=proposal, response="pending")
+    record_ready(state, turn)
     if reason == "checkpoint":
         state["defer_until"] = None
     return {"prepared": True, "proposal": proposal}
+
+
+def record_ready(state, turn):
+    state["evaluation"] = dict(turn_id=turn, auto_count=state["auto_count"],
+        decision="remind", note="已核实安全位置、后续及适用触发条件",
+        next_check="next_compaction")
 
 
 def receipt(state, proposal, channel):
     if proposal["closed"]:
         raise ValueError("proposal already closed")
     proposal[channel + "_delivered"] = True
-    if not proposal["counted"]:
+    if channel == "final" and not proposal["counted"]:
         proposal["counted"] = True
         state["tracked_reminder_count"] += 1
         if state["reminder_count"] is not None:
@@ -212,29 +273,49 @@ def final_contains_notice(message, notice):
         elif not fenced and not line.lstrip().startswith(">"):
             lines.append(line)
     normalize = lambda value: re.sub(r"[\s*`_]", "", value)
-    return any(normalize(p) == normalize(notice)
-               for p in re.split(r"\n\s*\n", "\n".join(lines)))
+    paragraphs = [p for p in re.split(r"\n\s*\n", "\n".join(lines)) if p.strip()]
+    return bool(paragraphs) and normalize(paragraphs[0]) == normalize(notice)
 
 
 def check_stop(state, event):
-    proposal = state["proposal"]
-    if (state["muted"] or not proposal or proposal["closed"] or
-            proposal["final_delivered"] or event.get("turn_id") != proposal["turn_id"]):
+    turn = event.get("turn_id")
+    if state["muted"] or not turn or (state.get("active_turn_id") and turn != state["active_turn_id"]):
         return {}
-    if final_contains_notice(event.get("last_assistant_message"), proposal["notice"]):
+    proposal = state["proposal"]
+    current = (proposal and not proposal["closed"] and not proposal["final_delivered"]
+               and turn == proposal["turn_id"])
+    if current and final_contains_notice(event.get("last_assistant_message"), proposal["notice"]):
         receipt(state, proposal, "final")
         proposal["final_missed"] = False
         return {}
-    if proposal["final_missed"]:
+    if current:
+        issue = "final_missing"
+        reason = ("本轮已准备的交接建议漏出最终答复。保留成果，在正文最前单独补上此段；"
+                  "不重做任务、不保存交接材料、不新建任务：\n" + proposal["notice"])
+    elif evaluation_due(state, turn):
+        issue = "evaluation_missing"
+        reason = ("project-handoff 到达压缩检查点，但没有本次评估记录。读取 Skill，"
+                  "只做一次评估：符合提醒条件则 prepare 并把建议放在最终正文最前；"
+                  "否则 evaluate，写明暂不提醒的具体原因和 next_check。"
+                  "纯问答、无后续或讨论本 Skill 应记录 skip，不主动提醒。"
+                  "保留已有成果；不新建任务、不执行交接。本次最多补漏一次。")
+    else:
         return {}
-    if not proposal["retry_used"] and not event.get("stop_hook_active"):
-        proposal["retry_used"] = True
-        return {"decision": "block", "reason": (
-            "本轮已准备的交接建议漏出最终答复。保留本轮成果答复，在末尾补上下面这一段；"
-            "只补答复，不重做工作、不保存交接材料、不新建任务。本次补写最多一次：\n"
-            + proposal["notice"])}
-    proposal["final_missed"] = True
-    return {"systemMessage": "project-handoff：最终提醒仍未核验到，本轮不再自动补写；未虚报最终送达。"}
+    audit = state.get("stop_audit")
+    if not audit or audit["turn_id"] != turn:
+        audit = dict(turn_id=turn, retry_used=False, missed=False)
+        state["stop_audit"] = audit
+    if audit["missed"]:
+        return {}
+    if not audit["retry_used"] and not event.get("stop_hook_active"):
+        audit["retry_used"] = True
+        if current:
+            proposal["retry_used"] = True
+        return {"decision": "block", "reason": reason}
+    audit.update(missed=True, issue=issue)
+    if current:
+        proposal["final_missed"] = True
+    return {"systemMessage": "project-handoff：评估或最终提醒仍未核验，本轮停止补漏；未计为正式提醒。"}
 
 
 def context_output(state, name):
@@ -242,25 +323,27 @@ def context_output(state, name):
     if count == 0 and not state["proposal"] and not state["muted"]:
         return {}
     total = (str(state["reminder_count"]) + "次" if state["reminder_count"] is not None else
-             f"历史总数未知，新版已核验{state['tracked_reminder_count']}次")
-    base = f"project-handoff：自动压缩{count}次；实际提醒{total}；"
+             f"历史最终总数未知，新版已核验{state['tracked_reminder_count']}次")
+    base = f"project-handoff：自动压缩{count}次；最终文本提醒{total}；"
     if state.get("active_turn_id"):
         base += f"当前turn_id={state['active_turn_id']}；"
     if state["last_notified_at"] is not None:
-        base += f"上次提醒发生于第{state['last_notified_at']}次压缩。"
+        base += f"提醒冷却参考第{state['last_notified_at']}次压缩。"
     if state["muted"]:
         context = "本任务主动提醒已关闭；显式交接或恢复提醒请求仍执行。"
-    elif state["proposal"] and not state["proposal"]["closed"] and not state["proposal"]["final_delivered"]:
-        context = ("存在尚未核验最终送达的建议。先核对用户最新回应；本轮仍需展示才按原阶段重新prepare，"
-                   "并在最终答复保留notice原段，不因进度消息已发而遗漏；不得每轮追问。")
     elif state["defer_until"]:
-        context = f"等待用户指定节点{state['defer_until']}；到节点再评估，普通阶段和次数不催促。"
-    elif count < state["next_reminder_at"]:
+        context = f"等待用户指定节点{state['defer_until']}；节点到达才评估，普通次数不催促。"
+    elif state["proposal"] and not state["proposal"]["closed"] and not state["proposal"]["final_delivered"]:
+        context = ("存在尚未最终展示的建议。先核对最新回应：仍适用则按原标识重新 prepare，"
+                   "放在最终正文最前；不适用则 evaluate 或 cancel。进度提醒不计正式次数。")
+    elif evaluation_due(state, state.get("active_turn_id")):
+        context = ("本次压缩检查点待评估：最终答复前执行 prepare 或 evaluate。"
+                   "prepare 成功才提醒；不提醒须记录原因及下次检查时机。"
+                   "首次到三次需安全位置和后续；再次提醒还需新阶段与具体收益。")
+    elif state["auto_count"] < state["next_reminder_at"]:
         context = f"冷却至第{state['next_reminder_at']}次压缩；新阶段不越过冷却。"
-    elif state["last_notified_at"] is None and not state["stage_keys"]:
-        context = "首次次数提醒已到点：收拢操作、有明确后续时准备建议，并保留在本轮最终答复。"
     else:
-        context = "冷却已解除，仅在新的实质阶段且有具体切换收益时再提醒；不能仅因次数提醒。"
+        context = "本次压缩点已评估；新实质阶段仍应评估，不重复同阶段提醒。"
     context += (f"执行前读取{SKILL}及references/compaction-reminder.md。"
                 "新且已核实的混淆先纠正，可提前提醒；同一问题去重，静默优先。"
                 "纯问答、无后续或讨论/修改本Skill不提醒。注入不算送达，普通继续不算交接批准。")
@@ -294,6 +377,8 @@ def process(event, root, action="hook", response=None, reason=None, **opts):
             # One callback per successful automatic compaction. Do not deduplicate
             # by turn_id: a single turn can legitimately compact several times.
             state["auto_count"] += 1
+        elif action == "evaluate":
+            result = evaluate(state, event, opts)
         elif action == "prepare":
             result = prepare(state, event, reason, opts)
         elif action == "notified":
@@ -305,16 +390,20 @@ def process(event, root, action="hook", response=None, reason=None, **opts):
                 raise ValueError("receipt requires an explicit delivery channel")
             if event.get("turn_id") != proposal["turn_id"]:
                 raise ValueError("receipt must identify the original delivery turn")
-            if channel == "final" and (not state.get("active_turn_id") or
-                                       event["turn_id"] == state["active_turn_id"]):
-                raise ValueError("manual final receipt is only allowed on a later verified turn")
+            if channel == "final":
+                raise ValueError("final receipt requires host Stop evidence")
             receipt(state, proposal, channel)
         elif action == "cancel":
+            turn = key_arg(event.get("turn_id"), "turn_id")
+            if state.get("active_turn_id") and turn != state["active_turn_id"]:
+                raise ValueError("cancel must use current host turn")
             proposal = state["proposal"]
             if not proposal or opts.get("proposal_id") != proposal["id"]:
                 raise ValueError("cancel requires the current proposal ID")
             proposal["closed"] = True
             state["response"] = "cancelled"
+            state["evaluation"] = dict(turn_id=event.get("turn_id"), auto_count=state["auto_count"],
+                decision="skip", note="当前建议已撤销", next_check="next_compaction")
         elif action == "respond":
             respond(state, event, response, opts)
         elif action == "hook" and name == "Stop":
@@ -339,7 +428,7 @@ def process(event, root, action="hook", response=None, reason=None, **opts):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-dir", type=Path, required=True)
-    parser.add_argument("--action", choices=["hook", "status", "prepare", "notified", "respond", "cancel"],
+    parser.add_argument("--action", choices=["hook", "status", "evaluate", "prepare", "notified", "respond", "cancel"],
                         default="hook")
     parser.add_argument("--session-id")
     parser.add_argument("--turn-id")
@@ -351,6 +440,9 @@ def main():
     parser.add_argument("--proposal-id")
     parser.add_argument("--channel", choices=["commentary", "final"])
     parser.add_argument("--notice")
+    parser.add_argument("--outcome", choices=["defer", "skip"])
+    parser.add_argument("--note")
+    parser.add_argument("--next-check", choices=["next_turn", "next_compaction"])
     parser.add_argument("--safe", action="store_true")
     parser.add_argument("--has-next", action="store_true")
     parser.add_argument("--benefit", action="store_true")

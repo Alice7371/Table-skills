@@ -23,7 +23,6 @@ NOTICE = "交接建议：设计已经确认，后续进入样片；确认后保�
 
 class ReminderTests(unittest.TestCase):
     def setUp(self):
-        # Keep fixtures below the legacy Windows path limit in nested checkouts.
         self.root = RUN / hashlib.sha256(self._testMethodName.encode()).hexdigest()[:12]
         self.sid = "main-session"
         self.turn = "turn-a"
@@ -61,7 +60,7 @@ class ReminderTests(unittest.TestCase):
     def delivered(self):
         self.compact(3)
         self.assertTrue(self.prep()["prepared"])
-        self.hook("Stop", last_assistant_message="已完成交付。\n\n" + NOTICE)
+        self.hook("Stop", last_assistant_message=NOTICE + "\n\n已完成交付。")
 
     def test_status_is_readonly_even_for_missing_state(self):
         self.assertEqual(self.status()["auto_count"], 0)
@@ -86,9 +85,9 @@ class ReminderTests(unittest.TestCase):
         self.compact(6)
         self.assertEqual(self.status()["auto_count"], 6)
 
-    def test_no_proposal_means_stop_has_no_effect(self):
+    def test_no_proposal_still_checks_missing_evaluation(self):
         self.compact(9)
-        self.assertEqual(self.hook("Stop", last_assistant_message="普通任务已完成"), {})
+        self.assertEqual(self.hook("Stop", last_assistant_message="普通任务已完成")["decision"], "block")
         self.assertEqual(self.status()["reminder_count"], 0)
 
     def test_unsafe_or_finished_work_cannot_prepare(self):
@@ -107,9 +106,9 @@ class ReminderTests(unittest.TestCase):
         self.prep()
         self.shown()
         self.compact()
-        self.hook("Stop", last_assistant_message="成果如下。\n\n**" + NOTICE + "**")
+        self.hook("Stop", last_assistant_message="**" + NOTICE + "**\n\n成果如下。")
         s = self.status()
-        self.assertEqual((s["reminder_count"], s["last_notified_at"], s["next_reminder_at"]), (1, 3, 6))
+        self.assertEqual((s["reminder_count"], s["last_notified_at"], s["next_reminder_at"]), (1, 4, 7))
         self.assertTrue(s["proposal"]["final_delivered"])
 
     def test_final_only_counts_after_stop_evidence(self):
@@ -126,14 +125,14 @@ class ReminderTests(unittest.TestCase):
             self.shown("final")
         self.assertEqual(self.status()["reminder_count"], 0)
 
-    def test_next_turn_manual_receipt_and_stop_are_idempotent(self):
+    def test_manual_final_receipt_cannot_invent_delivery(self):
         self.compact(3)
         self.prep()
         self.turn = "turn-b"
         self.hook("UserPromptSubmit", prompt="后续工作")
-        self.shown("final", "turn-a")
-        self.shown("final", "turn-a")
-        self.assertEqual(self.status()["reminder_count"], 1)
+        with self.assertRaises(ValueError):
+            self.shown("final", "turn-a")
+        self.assertEqual(self.status()["reminder_count"], 0)
 
     def test_missing_final_repairs_once_then_records_failure(self):
         self.compact(3)
@@ -150,7 +149,7 @@ class ReminderTests(unittest.TestCase):
         self.compact(3)
         self.prep()
         self.hook("Stop", last_assistant_message="已完成")
-        self.hook("Stop", last_assistant_message="已完成\n\n" + NOTICE, stop_hook_active=True)
+        self.hook("Stop", last_assistant_message=NOTICE + "\n\n已完成", stop_hook_active=True)
         self.hook("Stop", last_assistant_message=NOTICE)
         self.assertEqual(self.status()["reminder_count"], 1)
 
@@ -169,7 +168,7 @@ class ReminderTests(unittest.TestCase):
     def test_examples_are_not_delivery(self):
         for text in ("> " + NOTICE, "```text\n" + NOTICE + "\n```", "示例：" + NOTICE):
             self.assertFalse(m.final_contains_notice(text, NOTICE))
-        self.assertTrue(m.final_contains_notice("结果\n\n" + NOTICE + "\n\n<oai-mem-citation>meta", NOTICE))
+        self.assertTrue(m.final_contains_notice(NOTICE + "\n\n结果\n\n<oai-mem-citation>meta", NOTICE))
 
     def test_cooldown_alone_does_not_trigger_repeat(self):
         self.delivered()
@@ -351,6 +350,113 @@ class ReminderTests(unittest.TestCase):
         result = subprocess.run(command, input="{}", text=True, encoding="utf-8", capture_output=True, timeout=8)
         self.assertEqual(result.returncode, 0)
         self.assertIn("systemMessage", json.loads(result.stdout))
+
+    def evaluation(self, outcome="defer", next_check="next_compaction", note="仍在同一阶段，没有新的切换收益"):
+        return m.process(self.event(""), self.root, "evaluate", outcome=outcome,
+                         next_check=next_check, note=note)
+
+    def test_commentary_is_not_formal_delivery_or_cooldown(self):
+        self.compact(3); self.prep(); self.shown()
+        s=self.status()
+        self.assertEqual(s["reminder_count"],0)
+        self.assertEqual(s["next_reminder_at"],3)
+        self.assertIsNone(s["last_notified_at"])
+        self.assertEqual(s["stage_keys"],[])
+
+    def test_evaluation_defers_until_next_compaction_not_every_turn(self):
+        self.compact(6); self.evaluation()
+        self.assertEqual(self.hook("Stop",last_assistant_message="成果"),{})
+        self.turn="later";self.hook("UserPromptSubmit")
+        self.assertEqual(self.hook("Stop",last_assistant_message="问答"),{})
+        self.compact()
+        self.assertEqual(self.hook("Stop",last_assistant_message="成果")["decision"],"block")
+
+    def test_unsafe_rechecks_next_turn(self):
+        self.compact(3);self.evaluation(next_check="next_turn",note="文件写入尚未安全收拢，下轮完成后重评")
+        self.assertEqual(self.hook("Stop",last_assistant_message="进展"),{})
+        self.turn="next";self.hook("UserPromptSubmit")
+        self.assertEqual(self.hook("Stop",last_assistant_message="成果")["decision"],"block")
+
+    def test_negative_decision_requires_reason_and_next_check(self):
+        self.compact(3)
+        for opts in [dict(note=""),dict(next_check="never"),dict(outcome="remind")]:
+            with self.assertRaises(ValueError):self.evaluation(**opts)
+        self.assertIsNone(self.status()["evaluation"])
+
+    def test_one_stop_retry_shared_by_missing_evaluation_and_final(self):
+        self.compact(3)
+        self.assertEqual(self.hook("Stop",last_assistant_message="成果")["decision"],"block")
+        self.prep()
+        self.assertNotIn("decision",self.hook("Stop",last_assistant_message="遗漏",stop_hook_active=True))
+        self.assertEqual(self.status()["reminder_count"],0)
+        self.assertEqual(self.hook("Stop",last_assistant_message="遗漏"),{})
+
+    def test_skip_discussion_repairs_without_reminding(self):
+        self.compact(6)
+        self.hook("Stop",last_assistant_message="Skill 审查完成")
+        self.evaluation(outcome="skip",note="本轮只讨论交接 Skill，不执行交接")
+        self.assertEqual(self.hook("Stop",last_assistant_message="Skill 审查完成",stop_hook_active=True),{})
+        self.assertEqual(self.status()["reminder_count"],0)
+
+    def test_delivered_old_proposal_does_not_hide_due_evaluation(self):
+        self.delivered();self.compact(3)
+        self.turn="next";self.hook("UserPromptSubmit")
+        self.assertEqual(self.hook("Stop",last_assistant_message="成果")["decision"],"block")
+
+    def test_v2_commentary_only_migration_preserves_counter_and_uncertainty(self):
+        self.compact(3);self.prep()
+        path=m.state_path(self.root,self.sid);s=self.status()
+        s.update(tracking_version=2,reminder_count=1,tracked_reminder_count=1,
+                 last_notified_at=3,next_reminder_at=6,stage_keys=["design"])
+        s["proposal"].update(counted=True,commentary_delivered=True,final_delivered=False)
+        path.write_text(json.dumps(s),encoding="utf-8")
+        original=path.read_bytes();s=self.status()
+        self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(s["auto_count"],3)
+        self.assertEqual(s["reminder_count"],0)
+        self.assertEqual(s["next_reminder_at"],3)
+        self.assertEqual(s["legacy_delivery_counts"]["reminder_count"],1)
+
+    def test_v2_multiple_reminders_do_not_invent_final_total(self):
+        self.compact(9);p=m.state_path(self.root,self.sid);s=self.status()
+        s.update(tracking_version=2,reminder_count=4,tracked_reminder_count=4,last_notified_at=6)
+        p.write_text(json.dumps(s),encoding="utf-8")
+        self.assertIsNone(self.status()["reminder_count"])
+        self.assertIn("历史最终总数未知",json.dumps(self.hook("UserPromptSubmit"),ensure_ascii=False))
+
+    def test_ready_evaluation_cannot_replace_notice_delivery(self):
+        self.compact(3);self.prep()
+        self.assertEqual(self.status()["evaluation"]["decision"],"remind")
+        self.assertEqual(self.hook("Stop",last_assistant_message="已评估")["decision"],"block")
+
+    def test_old_turn_evaluation_cannot_mask_current_checkpoint(self):
+        self.compact(3);self.turn="wrong"
+        with self.assertRaises(ValueError):self.evaluation()
+
+
+    def test_notice_after_cards_is_not_accepted_as_front_notice(self):
+        self.compact(3);self.prep()
+        self.assertEqual(self.hook("Stop",last_assistant_message="::created-thread{threadId=x}\n\n"+NOTICE)["decision"],"block")
+        self.assertEqual(self.status()["reminder_count"],0)
+        self.hook("Stop",last_assistant_message=NOTICE+"\n\n成果",stop_hook_active=True)
+        self.assertEqual(self.status()["reminder_count"],1)
+
+    def test_failed_prepare_still_requires_negative_evaluation(self):
+        self.compact(3);self.assertFalse(self.prep(safe=False)["prepared"])
+        self.assertEqual(self.hook("Stop",last_assistant_message="未收拢")["decision"],"block")
+
+    def test_user_defer_suppresses_automatic_evaluation_until_checkpoint(self):
+        self.delivered();self.reply("defer",checkpoint_key="ready");self.compact(20)
+        self.turn="new";self.hook("UserPromptSubmit")
+        self.assertEqual(self.hook("Stop",last_assistant_message="进展"),{})
+
+    def test_cancel_rejects_stale_turn_without_writing(self):
+        self.compact(3);self.prep();self.turn="wrong"
+        before=m.state_path(self.root,self.sid).read_bytes()
+        with self.assertRaises(ValueError):
+            m.process(self.event(""),self.root,"cancel",proposal_id=self.pid())
+        self.assertEqual(m.state_path(self.root,self.sid).read_bytes(),before)
+
 
     def test_prompt_body_is_not_saved_in_state(self):
         self.compact()
