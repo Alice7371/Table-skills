@@ -18,6 +18,12 @@
 & '<PYTHON_EXE>' -X utf8 '<SKILL_DIRECTORY>/scripts/compaction_reminder.py' --state-dir '<CODEX_HOME>/state/project-handoff' --session-id '<当前任务ID>' --action status
 ```
 
+macOS/Linux 使用 shell：
+
+```bash
+'<PYTHON_EXE>' -X utf8 '<SKILL_DIRECTORY>/scripts/compaction_reminder.py' --state-dir '<CODEX_HOME>/state/project-handoff' --session-id '<当前任务ID>' --action status
+```
+
 先将 `<PYTHON_EXE>`、`<SKILL_DIRECTORY>`、`<CODEX_HOME>` 替换为本机实际 Python 程序、技能目录及 Codex 配置目录。`status` 只读，不建锁、不写回。以下动作替换上面的 `--action status`，并补参数：
 
 | 动作 | 参数 |

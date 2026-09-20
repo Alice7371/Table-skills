@@ -2,13 +2,17 @@
 import argparse
 import hashlib
 import json
-import msvcrt
 import os
 from pathlib import Path
 import re
 import sys
 import time
 from contextlib import contextmanager
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 INTERVAL = 3
 SKILL = Path(__file__).resolve().parents[1] / "SKILL.md"
@@ -24,8 +28,11 @@ def locked(path):
         deadline = time.monotonic() + 2
         while True:
             try:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -34,8 +41,11 @@ def locked(path):
         try:
             yield
         finally:
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def is_subagent(event):
