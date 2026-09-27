@@ -2,7 +2,9 @@
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -494,6 +496,25 @@ class ReminderTests(unittest.TestCase):
         self.assertIn("首次", output["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("decision", output)
         self.assertNotIn("continue", output)
+
+    def test_windows_hook_template_runs_under_powershell(self):
+        template = json.loads((REPO / "project-handoff" / "hooks" / "codex-hooks.example.json").read_text(encoding="utf-8"))
+        handlers = {name: groups[0]["hooks"][0] for name, groups in template["hooks"].items()}
+        self.assertEqual(set(handlers), {"SessionStart", "UserPromptSubmit", "PostCompact", "Stop"})
+        for handler in handlers.values():
+            self.assertEqual(handler["commandWindows"], "& " + handler["command"])
+        pwsh = shutil.which("pwsh")
+        if os.name != "nt" or not pwsh:
+            self.skipTest("needs Windows and PowerShell 7")
+        command = (handlers["PostCompact"]["commandWindows"].replace("<PYTHON_EXE>", sys.executable)
+                   .replace("<SKILL_DIRECTORY>", SCRIPT.parents[1].as_posix())
+                   .replace("<CODEX_HOME>", self.root.as_posix()))
+        result = subprocess.run([pwsh, "-NoProfile", "-Command", command],
+                                input=json.dumps(self.event("PostCompact", trigger="auto")),
+                                text=True, encoding="utf-8", capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = m.process(self.event(""), self.root / "state" / "project-handoff", "status")
+        self.assertEqual(state["auto_count"], 1)
 
 
 if __name__ == "__main__":

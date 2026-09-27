@@ -52,7 +52,7 @@ macOS/Linux 使用 shell：
 
 ## 部署与回退
 
-Hook 模板见 [codex-hooks.example.json](../hooks/codex-hooks.example.json)。替换模板路径后，合并到用户 `hooks.json`，保留原有 Hook；旧版缺少 Stop 条目时需单独审阅并完成原生信任。配置或信任需要变更时另按授权执行；不能绕过宿主原生信任。文件、模拟事件、真实宿主事件、最终文本和用户界面可见性是不同证据。
+Hook 模板见 [codex-hooks.example.json](../hooks/codex-hooks.example.json)。Windows 上 Codex 通过 PowerShell 执行 `commandWindows`，带引号的程序路径前必须有调用符 `&`，否则解析失败；其他系统执行 `command`。替换模板路径后，合并到用户 `hooks.json`，保留原有 Hook；旧版缺少 Stop 条目时需单独审阅并完成原生信任。配置或信任需要变更时另按授权执行；不能绕过宿主原生信任。文件、模拟事件、真实宿主事件、最终文本和用户界面可见性是不同证据。
 
 回退代码时保留已增加的真实压缩计数，不覆盖运行状态为旧快照。旧版脚本不识别版本 3 时，需先备份当前状态并核对字段兼容性，再制定迁移方案；不能只降低版本号或用旧快照覆盖新计数。
 

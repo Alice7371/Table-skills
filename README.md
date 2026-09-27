@@ -49,7 +49,7 @@
 
 **提醒与授权**：首次到第三次自动压缩后，在安全且有明确后续的位置提醒。之后还需满足新阶段、具体切换收益和冷却条件，不是每三次压缩机械提醒。普通“继续”不等于同意新建任务；提醒不会自动执行交接。
 
-**可选 Hook**：仅在 Windows Codex 上验证。安装 Skill 不等于启用 Hook；配置前需替换示例路径、合并已有配置，并完成宿主原生信任。见 [计数器说明](project-handoff/references/compaction-reminder.md) 和 [Hook 模板](project-handoff/hooks/codex-hooks.example.json)。
+**可选 Hook**：仅在 Windows Codex 上验证。模板中 `commandWindows` 供 Windows 使用（Codex 通过 PowerShell 执行，需以 `&` 调用），`command` 供其他系统使用。安装 Skill 不等于启用 Hook；配置前需替换示例路径、合并已有配置，并完成宿主原生信任。见 [计数器说明](project-handoff/references/compaction-reminder.md) 和 [Hook 模板](project-handoff/hooks/codex-hooks.example.json)。
 
 Hook 能检查压缩节点和记录是否缺失，不能独立判断所有业务阶段，也不能证明用户已经看到提醒。没有真实压缩事件时不猜次数；没有接续工具时提供手动入口。
 
